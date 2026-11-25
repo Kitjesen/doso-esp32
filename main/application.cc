@@ -8,9 +8,11 @@
 #include "mcp_server.h"
 #include "mqtt_protocol.h"
 #include "settings.h"
+#include "sfx_control.h"
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#include "usb_protocol.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -166,11 +168,23 @@ void Application::Initialize() {
         }
     });
 
-    // Start network asynchronously
+    // Start network (no-op in USB direct mode) & SfxControl catalog
     board.StartNetwork();
-
-    // Update the status bar immediately to show the network state
+    SfxControl::GetInstance().Start();
     display->UpdateStatusBar(true);
+
+    // Immediately activate USB direct audio without waiting for Wi-Fi or HTTP OTA!
+    SetDeviceState(kDeviceStateActivating);
+    if (activation_task_handle_ == nullptr) {
+        xTaskCreate(
+            [](void* arg) {
+                Application* app = static_cast<Application*>(arg);
+                app->ActivationTask();
+                app->activation_task_handle_ = nullptr;
+                vTaskDelete(NULL);
+            },
+            "activation", 4096 * 2, this, 2, &activation_task_handle_);
+    }
 }
 
 void Application::Run() {
@@ -354,12 +368,6 @@ void Application::HandleActivationDoneEvent() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    if (!has_error) {
-        Schedule([this]() {
-            // Play the success sound to indicate the device is ready
-            audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
-        });
-    }
 }
 
 void Application::ActivationTask() {
@@ -369,8 +377,8 @@ void Application::ActivationTask() {
     // Check for new assets version
     CheckAssetsVersion();
 
-    // Check for new firmware version
-    CheckNewVersion();
+    // USB Direct Mode: mark app valid immediately without blocking on HTTP OTA
+    ota_->MarkCurrentVersionValid();
 
     // Initialize the protocol
     InitializeProtocol();
@@ -535,14 +543,7 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-    if (ota_->HasMqttConfig()) {
-        protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
-        protocol_ = std::make_unique<WebsocketProtocol>();
-    } else {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-        protocol_ = std::make_unique<MqttProtocol>();
-    }
+    protocol_ = std::make_unique<UsbProtocol>();
 
     protocol_->OnConnected([this]() { DismissAlert(); });
 
@@ -554,6 +555,13 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        } else {
+            auto sp = std::shared_ptr<AudioStreamPacket>(std::move(packet));
+            Schedule([this, sp]() {
+                if (GetDeviceState() == kDeviceStateSpeaking && sp) {
+                    audio_service_.PushPacketToDecodeQueue(std::make_unique<AudioStreamPacket>(std::move(*sp)));
+                }
+            });
         }
     });
 
@@ -645,6 +653,7 @@ void Application::InitializeProtocol() {
                         glyphs.clear();
                     }
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
+                    SfxControl::GetInstance().NotifyText("tts", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring),
                               glyphs = std::move(glyphs), bpp]() {
                         display->AddTextGlyphs(glyphs, bpp);
@@ -661,6 +670,7 @@ void Application::InitializeProtocol() {
                     glyphs.clear();
                 }
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
+                SfxControl::GetInstance().NotifyText("stt", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring),
                           glyphs = std::move(glyphs), bpp]() {
                     display->AddTextGlyphs(glyphs, bpp);
@@ -777,6 +787,10 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
+void Application::EnsureAudioChannelIdle() {
+    Schedule([this]() { HandleEnsureAudioChannelIdle(); });
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
@@ -867,13 +881,13 @@ void Application::HandleStartListeningEvent() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
+            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeRealtime); });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(kListeningModeRealtime);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(kListeningModeRealtime);
     }
 }
 
@@ -892,6 +906,55 @@ void Application::HandleStopListeningEvent() {
         }
         SetDeviceState(kDeviceStateIdle);
     }
+}
+
+void Application::HandleEnsureAudioChannelIdle() {
+    if (!protocol_) {
+        ESP_LOGE(TAG, "Protocol not initialized");
+        return;
+    }
+
+    auto state = GetDeviceState();
+    if (state == kDeviceStateNotifying) {
+        StopNotification();
+        state = GetDeviceState();
+    }
+
+    // Don't interrupt an active spoken turn or a state that cannot go idle here.
+    if (state == kDeviceStateSpeaking || state == kDeviceStateConnecting ||
+        state == kDeviceStateUpgrading || state == kDeviceStateActivating ||
+        state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting) {
+        ESP_LOGI(TAG, "EnsureAudioChannelIdle skipped in state %d", (int)state);
+        return;
+    }
+
+    if (state == kDeviceStateListening) {
+        protocol_->SendStopListening();
+        SetDeviceState(kDeviceStateIdle);
+        state = GetDeviceState();
+    }
+
+    if (state != kDeviceStateIdle) {
+        return;
+    }
+
+    if (protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "Audio channel already open, staying idle for wake word");
+        return;
+    }
+
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    if (!protocol_->OpenAudioChannel()) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    SetDeviceState(kDeviceStateIdle);
+    ESP_LOGI(TAG, "Audio channel opened, idle with wake word enabled");
 }
 
 void Application::HandleWakeWordDetectedEvent() {
@@ -1175,8 +1238,16 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
+    }
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        Schedule([this]() {
+            if (GetDeviceState() == kDeviceStateSpeaking) {
+                SetDeviceState(kDeviceStateListening);
+            }
+        });
     }
 }
 
@@ -1186,7 +1257,7 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 ListeningMode Application::GetDefaultListeningMode() const {
-    return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
+    return kListeningModeRealtime;
 }
 
 void Application::Reboot() {
@@ -1297,6 +1368,69 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
 }
 
+
+void Application::InvokeTextChat(const std::string& text) {
+    // Text from the PC/serial control path: send it as a complete utterance
+    // without opening the microphone or playing the listening popup, so
+    // those prompt sounds cannot be transcribed as the user question.
+    // Spoken wake-word dialogue still uses WakeWordInvoke().
+    if (!protocol_ || text.empty()) {
+        return;
+    }
+    Schedule([this, text]() { ContinueTextChat(text); });
+}
+
+void Application::ContinueTextChat(const std::string& text) {
+    if (!protocol_ || text.empty()) {
+        return;
+    }
+
+    auto state = GetDeviceState();
+    if (state == kDeviceStateNotifying) {
+        StopNotification();
+        state = GetDeviceState();
+    }
+
+    if (state == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    }
+
+    if (state == kDeviceStateListening) {
+        protocol_->SendStopListening();
+        audio_service_.EnableVoiceProcessing(false);
+        while (audio_service_.PopPacketFromSendQueue()) {
+        }
+        SetDeviceState(kDeviceStateIdle);
+        state = GetDeviceState();
+    }
+
+    // After TTS finishes, return to idle instead of re-entering listening.
+    listening_mode_ = kListeningModeManualStop;
+    play_popup_on_listening_ = false;
+
+    if (!protocol_->IsAudioChannelOpened()) {
+        if (GetDeviceState() != kDeviceStateConnecting &&
+            !SetDeviceState(kDeviceStateConnecting)) {
+            return;
+        }
+        auto& board = Board::GetInstance();
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        if (!protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateIdle);
+            return;
+        }
+    }
+
+    if (GetDeviceState() == kDeviceStateConnecting) {
+        SetDeviceState(kDeviceStateIdle);
+    }
+
+    ESP_LOGI(TAG, "Text chat: %s", text.c_str());
+    protocol_->SendStartListening(kListeningModeManualStop);
+    protocol_->SendWakeWordDetected(text);
+    protocol_->SendStopListening();
+}
+
 bool Application::CanEnterSleepMode() {
     if (GetDeviceState() != kDeviceStateIdle) {
         return false;
@@ -1371,4 +1505,62 @@ void Application::ResetProtocol() {
         // Reset protocol
         protocol_.reset();
     });
+}
+
+
+void Application::PlaySfxDemo() {
+    // One-shot listen-through of the robot-dog prompt pack after boot.
+    if (sfx_demo_task_started_) {
+        return;
+    }
+    sfx_demo_task_started_ = true;
+    if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+        if (codec->output_volume() < 70) {
+            codec->SetOutputVolume(80);
+        }
+    }
+    auto ok = xTaskCreate(
+        [](void* arg) {
+            auto* app = static_cast<Application*>(arg);
+            const std::string_view clips[] = {
+                Lang::Sounds::OGG_SFX_BOOT_SEQUENCE,
+                Lang::Sounds::OGG_SFX_PRECHECK_FAIL,
+                Lang::Sounds::OGG_SFX_WAKE,
+                Lang::Sounds::OGG_SFX_LISTEN,
+                Lang::Sounds::OGG_SFX_COMMAND_ACK,
+                Lang::Sounds::OGG_SFX_COMMAND_REJECT,
+                Lang::Sounds::OGG_SFX_BATTERY_LOW,
+                Lang::Sounds::OGG_SFX_BATTERY_CRITICAL,
+                Lang::Sounds::OGG_SFX_CHARGING,
+                Lang::Sounds::OGG_SFX_CONNECTED,
+                Lang::Sounds::OGG_SFX_DISCONNECTED,
+                Lang::Sounds::OGG_SFX_MODE_CHANGE,
+                Lang::Sounds::OGG_SFX_OBSTACLE,
+                Lang::Sounds::OGG_SFX_WARNING,
+                Lang::Sounds::OGG_SFX_FALL,
+                Lang::Sounds::OGG_SFX_STAND_UP,
+                Lang::Sounds::OGG_SFX_ESTOP,
+                Lang::Sounds::OGG_SFX_SLEEP,
+            };
+            ESP_LOGI(TAG, "Robot-dog SFX demo start, %u clips", (unsigned)(sizeof(clips) / sizeof(clips[0])));
+            for (const auto& clip : clips) {
+                if (clip.empty()) {
+                    ESP_LOGW(TAG, "SFX clip missing, skip");
+                    continue;
+                }
+                app->PlaySound(clip);
+                vTaskDelay(pdMS_TO_TICKS(80));
+                while (!app->audio_service_.IsPlaybackIdle()) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+                vTaskDelay(pdMS_TO_TICKS(450));
+            }
+            ESP_LOGI(TAG, "Robot-dog SFX demo done");
+            vTaskDelete(nullptr);
+        },
+        "sfx_demo", 4096, this, 5, nullptr);
+    if (ok != pdPASS) {
+        sfx_demo_task_started_ = false;
+        ESP_LOGE(TAG, "Failed to start SFX demo task");
+    }
 }

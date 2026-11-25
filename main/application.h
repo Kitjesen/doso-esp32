@@ -108,8 +108,15 @@ public:
      */
     void StopListening();
 
+    /**
+     * Open the audio channel if needed, then return to idle with wake-word on.
+     * Thread-safe: scheduled onto the main loop. Does not start listening.
+     */
+    void EnsureAudioChannelIdle();
+
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
+    void InvokeTextChat(const std::string& text);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
@@ -117,6 +124,7 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
+    void PlaySfxDemo();
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
@@ -141,6 +149,7 @@ private:
     std::string last_error_message_;
     AudioService audio_service_;
     NotifyPlayer notify_player_;
+    bool sfx_demo_task_started_ = false;
     uint32_t notification_playback_id_ = 0;
     std::unique_ptr<Ota> ota_;
 
@@ -160,6 +169,7 @@ private:
     void HandleToggleChatEvent();
     void HandleStartListeningEvent();
     void HandleStopListeningEvent();
+    void HandleEnsureAudioChannelIdle();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
@@ -167,6 +177,7 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void ContinueTextChat(const std::string& text);
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);

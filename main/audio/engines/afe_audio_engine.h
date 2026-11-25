@@ -35,7 +35,9 @@ public:
     bool HasWakeWord() const override;
     bool IsWakeWordDetectionEnabled() const override;
     bool IsVoiceProcessingEnabled() const override;
-    bool IsAfeWakeWord() const override { return HasWakeWord(); }
+    // Official rule: only AFE WakeNet may stay on while speaking.
+    // MultiNet/custom wake must not barge in during TTS playback.
+    bool IsAfeWakeWord() const override { return wake_detector_ == WakeDetector::kWakeNet; }
     size_t GetFeedSize() const override;
 
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) override;

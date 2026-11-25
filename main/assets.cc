@@ -6,6 +6,7 @@
 #include "lvgl_theme.h"
 #if HAVE_LVGL
 #include <spi_flash_mmap.h>
+#include <lvgl.h>
 #endif
 
 #include <esp_heap_caps.h>
@@ -279,6 +280,13 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
     }
 
     Assets::LoadSrmodelsFromIndex(assets, root.get());
+
+#if HAVE_LVGL
+    if (!lv_is_initialized()) {
+        ESP_LOGW(TAG, "LVGL is not initialized, skip font and emoji assets");
+        return true;
+    }
+#endif
 
     auto& theme_manager = LvglThemeManager::GetInstance();
     auto light_theme = theme_manager.GetTheme("light");

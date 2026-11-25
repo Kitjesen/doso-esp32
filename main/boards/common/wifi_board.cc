@@ -50,6 +50,8 @@ std::string WifiBoard::GetBoardType() {
 }
 
 void WifiBoard::StartNetwork() {
+    ESP_LOGI(TAG, "USB direct audio mode: WiFi radio disabled");
+    return;
     auto& wifi_manager = WifiManager::GetInstance();
 
     // Initialize WiFi manager
@@ -235,6 +237,7 @@ void WifiBoard::EnterWifiConfigMode() {
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
+    return false;
     return WifiManager::GetInstance().IsConfigMode();
 }
 
@@ -244,6 +247,7 @@ NetworkInterface* WifiBoard::GetNetwork() {
 }
 
 const char* WifiBoard::GetNetworkStateIcon() {
+    return MATERIAL_SYMBOLS_WIFI;
     auto& wifi = WifiManager::GetInstance();
 
     if (wifi.IsConfigMode()) {
@@ -268,11 +272,8 @@ std::string WifiBoard::GetBoardJson() {
     json += R"("name":")" + std::string(BOARD_NAME) + R"(",)";
     json += R"("manufacturer":")" + std::string(BOARD_MANUFACTURER) + R"(",)";
 
-    if (!wifi.IsConfigMode()) {
-        json += R"("ssid":")" + wifi.GetSsid() + R"(",)";
-        json += R"("rssi":)" + std::to_string(wifi.GetRssi()) + R"(,)";
-        json += R"("channel":)" + std::to_string(wifi.GetChannel()) + R"(,)";
-        json += R"("ip":")" + wifi.GetIpAddress() + R"(",)";
+    if (false) {
+        (void)wifi;
     }
 
     json += R"("mac":")" + SystemInfo::GetMacAddress() + R"("})";
@@ -280,6 +281,8 @@ std::string WifiBoard::GetBoardJson() {
 }
 
 void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
+    (void)level;
+    return;
     WifiPowerSaveLevel wifi_level;
     switch (level) {
         case PowerSaveLevel::LOW_POWER:
@@ -329,14 +332,10 @@ std::string WifiBoard::GetDeviceStatusJson() {
         cJSON_AddItemToObject(root, "battery", battery);
     }
 
-    // Network
-    auto& wifi = WifiManager::GetInstance();
+    // Network (USB Direct)
     auto network = cJSON_CreateObject();
-    cJSON_AddStringToObject(network, "type", "wifi");
-    cJSON_AddStringToObject(network, "ssid", wifi.GetSsid().c_str());
-    int rssi = wifi.GetRssi();
-    const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
-    cJSON_AddStringToObject(network, "signal", signal);
+    cJSON_AddStringToObject(network, "type", "usb");
+    cJSON_AddStringToObject(network, "signal", "strong");
     cJSON_AddItemToObject(root, "network", network);
 
     // Chip temperature
