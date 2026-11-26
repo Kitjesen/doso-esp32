@@ -137,6 +137,11 @@ public:
             AUDIO_I2S_GPIO_DIN,
             AUDIO_CODEC_PA_PIN,
             AUDIO_CODEC_ES8311_ADDR);
+        static bool input_gain_applied = false;
+        if (!input_gain_applied) {
+            audio_codec.SetInputGain(AUDIO_INPUT_GAIN_DB);
+            input_gain_applied = true;
+        }
         return &audio_codec;
     }
 

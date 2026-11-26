@@ -99,7 +99,7 @@ void Es8311AudioCodec::UpdateDeviceState() {
             .mclk_multiple = 0,
         };
         ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
+        ApplyInputGain();
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
     } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
         ESP_ERROR_CHECK(esp_codec_dev_close(dev_));
@@ -168,6 +168,42 @@ void Es8311AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
     ESP_LOGI(TAG, "Duplex channels created");
+}
+
+void Es8311AudioCodec::ApplyInputGain() {
+    if (dev_ == nullptr || ctrl_if_ == nullptr) {
+        return;
+    }
+    float pga_db = input_gain_;
+    if (pga_db < 0.0f) {
+        pga_db = 0.0f;
+    } else if (pga_db > 42.0f) {
+        pga_db = 42.0f;
+    }
+    ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, pga_db));
+
+    float extra_db = input_gain_ > 42.0f ? (input_gain_ - 42.0f) : 0.0f;
+    if (extra_db > 24.0f) {
+        extra_db = 24.0f;
+    }
+    uint8_t adc_vol = static_cast<uint8_t>(0xBF + static_cast<int>(extra_db * 2.0f + 0.5f));
+    ESP_ERROR_CHECK(static_cast<esp_err_t>(
+        ctrl_if_->write_reg(ctrl_if_, 0x17, 1, &adc_vol, 1)));
+
+    uint8_t reg16 = 0;
+    uint8_t reg17 = 0;
+    ctrl_if_->read_reg(ctrl_if_, 0x16, 1, &reg16, 1);
+    ctrl_if_->read_reg(ctrl_if_, 0x17, 1, &reg17, 1);
+    ESP_LOGI(TAG, "ES8311 input gain=%.1f dB (PGA=%.1f dB REG16=0x%02X, ADC_VOL=+%.1f dB REG17=0x%02X)",
+             input_gain_, pga_db, reg16, extra_db, reg17);
+}
+
+void Es8311AudioCodec::SetInputGain(float gain) {
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    AudioCodec::SetInputGain(gain);
+    if (dev_ != nullptr) {
+        ApplyInputGain();
+    }
 }
 
 void Es8311AudioCodec::SetOutputVolume(int volume) {

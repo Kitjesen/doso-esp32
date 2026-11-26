@@ -19,6 +19,8 @@
 #define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_41
 #define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_42
 #define AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
+// ES8311 hardware mic gain: 42 dB (REG16 max) + 6 dB (REG17=0xCB) = 48 dB (+18 dB / 8x over 30 dB default)
+#define AUDIO_INPUT_GAIN_DB      48.0f
 
 #define BUILTIN_LED_GPIO        GPIO_NUM_48
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0

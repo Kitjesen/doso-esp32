@@ -24,6 +24,7 @@ private:
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
     void ResetCodec();
+    void ApplyInputGain();
     void UpdateDeviceState();
 
     virtual int Read(int16_t* dest, int samples) override;
@@ -36,6 +37,7 @@ public:
     virtual ~Es8311AudioCodec();
 
     virtual void SetOutputVolume(int volume) override;
+    virtual void SetInputGain(float gain) override;
     virtual void EnableInput(bool enable) override;
     virtual void EnableOutput(bool enable) override;
 };
