@@ -175,7 +175,10 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
             afe_config->wakenet_model_name_2 = wakenet_models[1];
         }
     }
-    afe_config->agc_init = false;
+    afe_config->agc_init = true;
+    afe_config->agc_mode = AFE_AGC_MODE_WEBRTC;
+    afe_config->agc_compression_gain_db = 15;
+    afe_config->agc_target_level_dbfs = 3;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     ESP_LOGI(TAG, "Before AFE create: free=%u min=%u largest=%u",

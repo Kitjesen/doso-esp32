@@ -99,11 +99,18 @@ bool UsbLink::SendFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
 
     std::lock_guard<std::mutex> lock(tx_mutex_);
     size_t sent = 0;
+    int zero_retries = 0;
     while (sent < total) {
         int written = usb_serial_jtag_write_bytes(out + sent, total - sent, pdMS_TO_TICKS(15));
         if (written <= 0) {
-            return false;
+            // Once part of a frame has been placed in the USB TX FIFO, finish the frame
+            // rather than leaving a partial 0xA55A packet that desyncs the host parser.
+            if (sent == 0 || ++zero_retries > 5) {
+                return false;
+            }
+            continue;
         }
+        zero_retries = 0;
         sent += static_cast<size_t>(written);
     }
 #if HAS_USJ_LL_FLUSH
